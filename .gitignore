@@ -1,0 +1,10 @@
+# Ignore raw dataset
+auth.txt
+*.bz2
+*.zip
+
+# Ignore extracted dataset folders
+lanl-auth-dataset/
+*.log
+
+# Keep only code + reports
