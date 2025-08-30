@@ -1,0 +1,13 @@
+﻿{
+    "generated_at_local":  "2025-08-31T07:29:43",
+    "processed_lines":  5000000,
+    "unique_users":  8919,
+    "unique_computers":  10915,
+    "thresholds":  {
+                       "imp_travel_gap_mins":  60,
+                       "distinct_hosts":  50,
+                       "odd_hour_range":  "0-6",
+                       "total_events":  20000,
+                       "pair_events":  25000
+                   }
+}
