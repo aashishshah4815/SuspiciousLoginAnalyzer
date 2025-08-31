@@ -6,8 +6,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import classification_report, roc_auc_score
-from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report, roc_auc_score, f1_score
+from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score
 from sklearn.preprocessing import StandardScaler
 
 from ml.features import build_user_features
@@ -79,11 +79,22 @@ def main() -> None:
         Xte = scaler.transform(Xte)
         proba = clf.predict_proba(Xte)[:, 1]
         preds = (proba >= 0.5).astype(int)
+        print("\n[Hold-out Test Set Results]")
         print(classification_report(yte, preds, digits=4))
         try:
             print("ROC-AUC:", roc_auc_score(yte, proba))
         except Exception:
             print("ROC-AUC: n/a (only one class present in y_true or other issue)")
+
+    # --- Cross-Validation ---
+    if len(y) >= 5 and len(np.unique(y)) > 1:
+        print("\n[5-Fold Stratified CV Results]")
+        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+        f1_scores = cross_val_score(clf, scaler.fit_transform(X), y, cv=cv, scoring="f1")
+        print("F1 scores per fold:", f1_scores)
+        print(f"Mean F1: {np.mean(f1_scores):.3f} ± {np.std(f1_scores):.3f}")
+    else:
+        print("[!] Not enough samples for cross-validation.")
 
     # Score ALL users (from feats)
     Xall = scaler.transform(feats[X_cols].to_numpy())
@@ -93,6 +104,16 @@ def main() -> None:
 
     Path(OUT).write_text(out.to_csv(index=False), encoding="utf-8")
     print(f"[+] Wrote {OUT}")
+
+    # --- Feature importances ---
+    try:
+        fi = getattr(clf, "feature_importances_", None)
+        if fi is not None:
+            imp = pd.DataFrame({"feature": X_cols, "importance": fi})
+            imp.sort_values("importance", ascending=False).to_csv("Reports/feature_importances.csv", index=False)
+            print("[+] Wrote Reports/feature_importances.csv")
+    except Exception as e:
+        print("[!] Skipped feature_importances:", e)
 
 if __name__ == "__main__":
     main()

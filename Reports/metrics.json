@@ -1,0 +1,7 @@
+{
+  "samples": 50,
+  "positives": 7,
+  "ap": 0.9999999999999998,
+  "roc_auc": 1.0,
+  "classification_report": "              precision    recall  f1-score   support\n\n           0     1.0000    1.0000    1.0000        43\n           1     1.0000    1.0000    1.0000         7\n\n    accuracy                         1.0000        50\n   macro avg     1.0000    1.0000    1.0000        50\nweighted avg     1.0000    1.0000    1.0000        50\n"
+}
