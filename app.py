@@ -1,11 +1,16 @@
-# app.py
+# app.py — Suspicious Login Pattern Analyzer (fixed GitHub/Local paths)
+
+from __future__ import annotations
+import io
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional, Tuple, List
 
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import requests
 import streamlit as st
 
 # ============================================================
@@ -14,18 +19,17 @@ import streamlit as st
 st.set_page_config(page_title="Suspicious Login Analyzer", page_icon="🔐", layout="wide")
 
 # ============================================================
-# Sidebar
+# Sidebar — Source & Controls
 # ============================================================
 st.sidebar.title("Data Source")
 source = st.sidebar.radio("Load reports from:", ["Local (Reports/)", "GitHub (raw)"])
 
 st.sidebar.header("Display / Rules")
-top_n = st.sidebar.slider("Show top N rows", 5, 100, 30, 5)
-host_thresh   = st.sidebar.number_input("Flag users with > N distinct hosts", value=50, min_value=1)
-events_thresh = st.sidebar.number_input("Flag users with > N total events",   value=20000, min_value=1)
-pair_thresh   = st.sidebar.number_input("Flag user–computer pairs with > N events", value=25000, min_value=1)
-
-search_user = st.sidebar.text_input("Filter by user (contains)", "")
+top_n        = st.sidebar.slider("Show top N rows", 5, 100, 30, 5)
+host_thresh  = st.sidebar.number_input("Flag users with > N distinct hosts", value=50, min_value=1)
+events_thresh= st.sidebar.number_input("Flag users with > N total events",   value=20000, min_value=1)
+pair_thresh  = st.sidebar.number_input("Flag user–computer pairs with > N events", value=25000, min_value=1)
+search_user  = st.sidebar.text_input("Filter by user (contains)", "")
 
 if st.sidebar.button("🔄 Reload data"):
     st.cache_data.clear()
@@ -35,80 +39,112 @@ now_utc   = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 st.sidebar.caption(f"**Now (local):** {now_local}\n\n**Now (UTC):** {now_utc}")
 
 # ============================================================
-# Paths & cached loaders
+# GitHub repo settings (used only when source = GitHub)
 # ============================================================
 USER, REPO, BRANCH = "aashishshah4815", "SuspiciousLoginAnalyzer", "main"
-BASE = f"https://raw.githubusercontent.com/{USER}/{REPO}/{BRANCH}/Reports"
+
+RAW_BASE     = f"https://raw.githubusercontent.com/{USER}/{REPO}/{BRANCH}"
+REPORTS_BASE = f"{RAW_BASE}/Reports"
+MODELS_BASE  = f"{RAW_BASE}/models"
 
 def report_path(name: str) -> str:
-    """Reports/… locally or GitHub raw (Reports folder in repo)."""
-    return f"{BASE}/{name}" if source.startswith("GitHub") else f"Reports/{name}"
+    """Reports/<name> — local path or GitHub raw URL."""
+    return f"{REPORTS_BASE}/{name}" if source.startswith("GitHub") else f"Reports/{name}"
 
-@st.cache_data(ttl=300)
-def load_csv(path: str) -> pd.DataFrame:
-    return pd.read_csv(path)
+def model_path(name: str) -> str:
+    """models/<name> — local path or GitHub raw URL."""
+    return f"{MODELS_BASE}/{name}" if source.startswith("GitHub") else f"models/{name}"
 
-@st.cache_data(ttl=300)
-def load_json(path: str):
+# ============================================================
+# Robust loaders
+# ============================================================
+@st.cache_data(ttl=300, show_spinner=False)
+def _read_csv(path: str) -> pd.DataFrame:
+    """Reads CSV from local path or URL. Raises on error."""
+    # When using GitHub raw URLs, let pandas fetch via HTTP(S)
+    if path.startswith("http://") or path.startswith("https://"):
+        return pd.read_csv(path)
+    # Local file
+    p = Path(path)
+    if not p.exists() or p.stat().st_size == 0:
+        raise FileNotFoundError(f"Missing or empty file: {p}")
+    return pd.read_csv(p)
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _read_json(path: str) -> Optional[dict]:
+    """Reads JSON from local path or URL. Returns None on error."""
     try:
         if path.startswith("http"):
-            return json.loads(pd.read_json(path).to_json())
+            # requests for clearer errors across Streamlit hosting
+            r = requests.get(path, timeout=20)
+            r.raise_for_status()
+            return r.json()
         return json.loads(Path(path).read_text(encoding="utf-8"))
     except Exception:
         return None
 
-def safe_load_csv(label: str, name: str):
-    """Load a CSV from our report path and show a friendly error string if it fails."""
-    try:
-        df = load_csv(report_path(name))
-        return df, None
-    except Exception as e:
-        return None, f"❗ {label} failed to load: {e}"
-
-def optional_local_csv(possible_paths: list[str]) -> pd.DataFrame | None:
+def load_first_ok(label: str, candidates: List[str]) -> Tuple[Optional[pd.DataFrame], Optional[str], List[str]]:
     """
-    Best-effort local CSV loader (no GitHub). First existing path wins.
-    Returns None if nothing loads.
+    Try a list of candidate paths (URLs or local). Return (df, error_message, tried_paths).
     """
-    for p in possible_paths:
+    tried = []
+    for c in candidates:
+        tried.append(c)
         try:
-            if Path(p).exists():
-                return pd.read_csv(p)
-        except Exception:
-            pass
-    return None
-
-# Core reports
-pairs, err_pairs         = safe_load_csv("TopUserComputerPairs", "TopUserComputerPairs.csv")
-users_dist, err_dist     = safe_load_csv("TopUsers_ByDistinctComputers", "TopUsers_ByDistinctComputers.csv")
-users_events, err_events = safe_load_csv("TopUsers_ByEvents", "TopUsers_ByEvents.csv")
-meta = load_json(report_path("meta.json"))
-
-# Suspicious findings (optional)
-try:
-    suspicious = load_csv(report_path("SuspiciousFindings.csv"))
-except Exception:
-    suspicious = None
-
-# ML artifacts (optional)
-# Unsupervised: prefer Reports/AnomalyScores.csv; fallback to local models/AnomalyScores.csv
-ml_unsup = None
-try:
-    ml_unsup = load_csv(report_path("AnomalyScores.csv"))
-except Exception:
-    pass
-if ml_unsup is None and not source.startswith("GitHub"):
-    ml_unsup = optional_local_csv(["models/AnomalyScores.csv", "AnomalyScores.csv"])
-
-# Supervised: Reports/ML_Findings_Supervised.csv
-ml_sup = None
-try:
-    ml_sup = load_csv(report_path("ML_Findings_Supervised.csv"))
-except Exception:
-    pass
+            df = _read_csv(c)
+            if df is not None and not df.empty:
+                return df, None, tried
+        except Exception as e:
+            last_err = f"{label} failed to load from {c}: {e}"
+    # If we got here, all failed
+    return None, last_err if 'last_err' in locals() else f"{label} not found.", tried
 
 # ============================================================
-# Header & KPI
+# Core datasets
+# ============================================================
+pairs, err_pairs, tried_pairs = load_first_ok(
+    "TopUserComputerPairs",
+    [report_path("TopUserComputerPairs.csv")]
+)
+
+users_dist, err_dist, tried_dist = load_first_ok(
+    "TopUsers_ByDistinctComputers",
+    [report_path("TopUsers_ByDistinctComputers.csv")]
+)
+
+users_events, err_events, tried_events = load_first_ok(
+    "TopUsers_ByEvents",
+    [report_path("TopUsers_ByEvents.csv")]
+)
+
+meta = _read_json(report_path("meta.json"))
+
+# Suspicious findings (optional)
+suspicious, err_susp, _ = load_first_ok(
+    "SuspiciousFindings",
+    [report_path("SuspiciousFindings.csv")]
+)
+
+# ============================================================
+# ML artifacts — FIXED: look in Reports/ AND models/ for both sources
+# ============================================================
+# Unsupervised (AnomalyScores.csv): try Reports/ then models/
+ml_unsup, err_unsup, tried_unsup = load_first_ok(
+    "Unsupervised scores (AnomalyScores.csv)",
+    [
+        report_path("AnomalyScores.csv"),         # if you copied scores into Reports/
+        model_path("AnomalyScores.csv"),          # canonical location from training: models/
+    ]
+)
+
+# Supervised (ML_Findings_Supervised.csv): Reports/ only by design
+ml_sup, err_sup, tried_sup = load_first_ok(
+    "Supervised scores (ML_Findings_Supervised.csv)",
+    [report_path("ML_Findings_Supervised.csv")]
+)
+
+# ============================================================
+# Header & KPIs
 # ============================================================
 st.markdown(
     """
@@ -140,11 +176,13 @@ else:
 st.divider()
 
 # ============================================================
-# Top pairs section
+# Top pairs
 # ============================================================
 st.subheader("📈 Top User–Computer Pairs")
-if err_pairs:
-    st.error(err_pairs)
+if err_pairs and (pairs is None or pairs.empty):
+    with st.expander("Why no pair data?", expanded=False):
+        st.code("\n".join(tried_pairs or []), language="text")
+        st.error(err_pairs)
 elif pairs is None or pairs.empty:
     st.info("No pair data available.")
 else:
@@ -178,8 +216,10 @@ tab1, tab2, tab3, tabML, tabMap = st.tabs(
 
 # --- Distinct computers ---
 with tab1:
-    if err_dist:
-        st.error(err_dist)
+    if err_dist and (users_dist is None or users_dist.empty):
+        with st.expander("Why no distinct-computers data?", expanded=False):
+            st.code("\n".join(tried_dist or []), language="text")
+            st.error(err_dist)
     elif users_dist is None or users_dist.empty:
         st.info("No distinct-computers data available.")
     else:
@@ -209,8 +249,10 @@ with tab1:
 
 # --- Total events ---
 with tab2:
-    if err_events:
-        st.error(err_events)
+    if err_events and (users_events is None or users_events.empty):
+        with st.expander("Why no total-events data?", expanded=False):
+            st.code("\n".join(tried_events or []), language="text")
+            st.error(err_events)
     elif users_events is None or users_events.empty:
         st.info("No total-events data available.")
     else:
@@ -242,11 +284,14 @@ with tab2:
 with tab3:
     st.caption(f"Thresholds: hosts>{host_thresh}, user events>{events_thresh}, pair events>{pair_thresh}")
     if suspicious is None or suspicious.empty:
+        if err_susp:
+            with st.expander("Why no suspicious findings?", expanded=False):
+                st.error(err_susp)
         st.info("No suspicious findings (or file missing).")
     else:
         df_all = suspicious.copy()
 
-        # Highlight flags when columns exist
+        # Flags
         if "DistinctComputers" in df_all.columns:
             mask = (df_all.get("Rule") == "DistinctHosts") & (df_all["DistinctComputers"] > host_thresh)
             df_all.loc[mask, "Flag"] = "Host threshold"
@@ -269,7 +314,7 @@ with tab3:
             mime="text/csv",
         )
 
-# --- ML Scores (Unsupervised + Supervised) ---
+# --- ML Scores ---
 with tabML:
     cU, cS = st.columns(2)
 
@@ -277,15 +322,23 @@ with tabML:
     with cU:
         st.subheader("Unsupervised (IsolationForest + One-Class SVM)")
         if ml_unsup is None or ml_unsup.empty:
-            st.info("No unsupervised scores found. Train with:\n\n`python -m ml.train_unsupervised --reports Reports --outdir models`")
+            st.info(
+                "No unsupervised scores found. Train with:\n\n"
+                "`python -m ml.train_unsupervised --reports Reports --outdir models`\n\n"
+                "Looked for:\n"
+                f"- {report_path('AnomalyScores.csv')}\n"
+                f"- {model_path('AnomalyScores.csv')}"
+            )
         else:
             df_u = ml_unsup.copy()
             if "User" in df_u.columns:
                 if search_user:
                     df_u = df_u[df_u["User"].astype(str).str.contains(search_user, case=False, na=False)]
-                df_u = df_u.sort_values("EnsembleScore", ascending=False).head(top_n)
+                if "EnsembleScore" in df_u.columns:
+                    df_u = df_u.sort_values("EnsembleScore", ascending=False)
+                df_u = df_u.head(top_n)
             st.dataframe(df_u, use_container_width=True, height=360)
-            if "User" in df_u.columns and "EnsembleScore" in df_u.columns:
+            if {"User", "EnsembleScore"}.issubset(df_u.columns):
                 figu = px.bar(df_u, x="User", y="EnsembleScore", title="Top anomalies (ensemble)", text="EnsembleScore")
                 figu.update_traces(texttemplate="%{text:.3f}")
                 st.plotly_chart(figu, use_container_width=True)
@@ -301,15 +354,29 @@ with tabML:
     with cS:
         st.subheader("Supervised (RandomForest)")
         if ml_sup is None or ml_sup.empty:
-            st.info("No supervised scores found. Train with:\n\n`python -m ml.train_supervised`")
+            st.info(
+                "No supervised scores found. Train with:\n\n"
+                "`python -m ml.train_supervised --reports Reports --outdir models`\n\n"
+                "Looked for:\n"
+                f"- {report_path('ML_Findings_Supervised.csv')}"
+            )
         else:
             df_s = ml_sup.copy()
             if "User" in df_s.columns:
                 if search_user:
                     df_s = df_s[df_s["User"].astype(str).str.contains(search_user, case=False, na=False)]
-                df_s = df_s.sort_values(df_s.columns[-1], ascending=False).head(top_n)
+                # pick score column heuristically
+                score_col = None
+                for c in ("Sup_ProbBad", "prob", "score", "Score"):
+                    if c in df_s.columns:
+                        score_col = c
+                        break
+                if score_col:
+                    df_s = df_s.sort_values(score_col, ascending=False)
+                df_s = df_s.head(top_n)
             st.dataframe(df_s, use_container_width=True, height=360)
-            # Guess the score column name (e.g., Sup_ProbBad)
+
+            # plot if we found a score column
             score_col = None
             for c in ("Sup_ProbBad", "prob", "score", "Score"):
                 if c in df_s.columns:
@@ -329,23 +396,19 @@ with tabML:
 
 # --- Geo Map ---
 with tabMap:
-    if suspicious is None or suspicious.empty or "Country" not in suspicious.columns:
+    if suspicious is None or suspicious.empty or "Country" not in (suspicious.columns if isinstance(suspicious, pd.DataFrame) else []):
         st.info("No geo data available for plotting.")
     else:
         df_geo = suspicious.copy()
-
-        # Aggregate per country
         counts = df_geo["Country"].value_counts().reset_index()
         counts.columns = ["Country", "Count"]
 
-        # Choropleth (blue heat)
         fig_map = px.choropleth(
             counts, locations="Country", locationmode="country names",
             color="Count", title="Suspicious logins by country",
             color_continuous_scale="Blues"
         )
 
-        # Red dots when Lat/Lon exist
         if {"Lat", "Lon"}.issubset(df_geo.columns):
             fig_map.add_trace(
                 go.Scattergeo(
